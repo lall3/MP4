@@ -35,7 +35,7 @@
  */
 struct mp4_security {
 	int mp4_flags;
-
+	int level;
 	/* add any supporting definitions here if needed
 	 * ...
 	 */

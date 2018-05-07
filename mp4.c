@@ -22,12 +22,40 @@
  */
 static int get_inode_sid(struct inode *inode)
 {
-	/*
-	 * Add your code here
-	 * ...
-	 */
-	return 0;
-}
+	struct dentry * d_entry;
+	int sid;
+	char * buff;
+	int xttr_value;
+
+	buff = kmalloc(128, GFP_KERNEL);
+
+	if (!buff)
+		return 0;
+	
+	
+	d_entry = d_find_alias(inode);
+	if (d_entry == NULL)
+		return -ENOENT;
+	
+	xttr_value = inode->i_op->getxattr(d_entry, XATTR_NAME_MP4, buff, 128);
+
+	dput(dentry);
+	if (xttr_value == -ERANGE) 
+	{
+		dput(dentry);
+		kfree(buff);
+		return 0;
+	}
+	
+
+	buff[xttr_value]='\0'; //check
+	sid = __cred_ctx_to_sid(buff);
+	dput(dentry);
+
+	//pr_info("SID: %d\n", sid);
+
+	return sid;
+}//DONE
 
 /**
  * mp4_bprm_set_creds - Set the credentials for a new task
@@ -44,18 +72,18 @@ static int mp4_bprm_set_creds(struct linux_binprm *bprm)
 	 */
 	int sid;
 	struct inode *curr_inode = bprm->file->f_path.dentry->d_inode;
-	struct mp4_security * new_sec_struct;
+	struct mp4_security * new_sec_struct = (struct mp4_security*)kzalloc(sizeof(struct mp4_security), gfp);
 
 	sid = get_inode_sid(curr_inode);
 	if(sid != MP4_TARGET_SID)
 		return 0;
 
-
+	new_sec_struct->level = MP4_TARGET_SID;
 	new_sec_struct->mp4_flags = MP4_TARGET_SID;
 	bprm->cred->security = new_sec_struct;
 
 	return 0;
-}
+}//DONE
 
 /**
  * mp4_cred_alloc_blank - Allocate a blank mp4 security label
@@ -66,9 +94,9 @@ static int mp4_bprm_set_creds(struct linux_binprm *bprm)
  */
 static int mp4_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 {
-	struct task_security_struct *temp;
 
-	temp = kzalloc(sizeof(struct task_security_struct), gfp);//from slab
+	struct mp4_security *temp= (struct mp4_security*)kzalloc(sizeof(struct mp4_security), gfp);
+	temp->level = MP4_NO_ACCESS; 
 
 	if (!temp)
 		return -ENOMEM;
@@ -76,7 +104,7 @@ static int mp4_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 	cred->security = temp;
 
 	return 0;
-}
+}//DONE
 
 
 /**
@@ -87,9 +115,9 @@ static int mp4_cred_alloc_blank(struct cred *cred, gfp_t gfp)
  */
 static void mp4_cred_free(struct cred *cred)
 {
-	struct task_security_struct *temp = cred->security;
+	struct mp4_security *temp = cred->security;
 	kfree(temp);
-}
+}//DONE
 
 /**
  * mp4_cred_prepare - Prepare new credentials for modification
@@ -102,12 +130,12 @@ static void mp4_cred_free(struct cred *cred)
 static int mp4_cred_prepare(struct cred *new, const struct cred *old,
 			    gfp_t gfp)
 {
-	struct task_security_struct * old_struct;
-	struct task_security_struct * new_struct;
+	struct mp4_security * old_struct;
+	struct mp4_security * new_struct;
 	old_struct = old->security;
 
 	//selinux doccumentation
-	new_struct = kmemdup(old_struct, sizeof(struct task_security_struct), gfp);
+	new_struct =(struct mp4_security*) (kmemdup(old_struct, sizeof(struct mp4_security), gfp));
 
 	if(!new_struct)
 		return -ENOMEM;
@@ -115,7 +143,7 @@ static int mp4_cred_prepare(struct cred *new, const struct cred *old,
 	new->security = new_struct;
 	return 0;
 
-}
+}//DONE
 
 /**
  * mp4_inode_init_security - Set the security attribute of a newly created inode
@@ -139,28 +167,35 @@ static int mp4_inode_init_security(struct inode *inode, struct inode *dir,
 	 * ...
 	 */
 	int sid; 
-	char *pointer1 , *pointer2;
+	char *pointer1 , *pointer2, *pointer3;
 
-	if(!dir || !inode)
+	if(!current_cred() || !dir || !inode)
+		return -EOPNOTSUPP;
+
+	if(!(current_cred()->security))
 		return -EOPNOTSUPP;
 
 	sid = get_inode_sid(inode);
-	pointer1 = pointer2 = NULL;
+	pointer1 = pointer2 = pointer3 = NULL;
 
 	if(sid == MP4_TARGET_SID)
 	{
 		pointer1 = kstrdup(XATTR_NAME_MP4, GFP_KERNEL);
 		pointer2 = kstrdup("read-write", GFP_KERNEL); 
+		pointer3 = kstrdup("dir-write", GFP_KERNEL); 
 		//mem check
 		if(!pointer1 || !pointer2)
 			return -ENOMEM;
 		*name = pointer1;
-		*value = pointer2;
+		if(S_ISDIR(inode->i_mode))
+			*value = pointer2;
+		else
+			*value = pointer3;
 		*len= sizeof(XATTR_NAME_MP4);		
 	}
 
 	return 0;
-}
+}//DONE
 
 /**
  * mp4_has_permission - Check if subject has permission to an object
@@ -196,11 +231,29 @@ static int mp4_inode_permission(struct inode *inode, int mask)
 {
 	struct dentry *d_entry;
 
+	char * d_path;
+
 	if (mask==0)
 		return -EACCES;
 
 	d_entry = d_find_alias(inode); 
-	d_put(d_entry);
+	
+	if(!d_entry)
+	{
+		dput(d_entry);
+		return -EACCES;
+	}
+
+	d_path = kmalloc(128, GFP_KERNEL);
+	dentry_path(d_entry, d_path, 128);
+
+	if (mp4_should_skip_path(path)) {
+		kfree(path);
+		dput(dentry);
+		return -EACCES;
+	}
+
+
 
 	return 0;
 }
