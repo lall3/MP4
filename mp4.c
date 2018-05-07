@@ -39,7 +39,6 @@ static int get_inode_sid(struct inode *inode)
 	
 	xttr_value = inode->i_op->getxattr(d_entry, XATTR_NAME_MP4, buff, 128);
 
-	dput(dentry);
 	if (xttr_value == -ERANGE) 
 	{
 		dput(dentry);
@@ -248,11 +247,16 @@ static int mp4_inode_permission(struct inode *inode, int mask)
 	dentry_path(d_entry, d_path, 128);
 
 	if (mp4_should_skip_path(path)) {
-		kfree(path);
+		kfree(d_path);
 		dput(dentry);
 		return -EACCES;
 	}
 
+	if(!current_cred() || !(struct mp4_security*)(current_cred()->security)) {
+		dput(dentry);
+		kfree(d_path);
+		return -EACCES;
+	}
 
 
 	return 0;
